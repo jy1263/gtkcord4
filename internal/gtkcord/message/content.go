@@ -31,6 +31,7 @@ type Content struct {
 	parent *View
 	menu   *gio.Menu
 	view   *mdrender.MarkdownViewer
+	react  *contentReactions
 	child  []gtk.Widgetter
 }
 
@@ -132,28 +133,33 @@ func (c *Content) Update(m *discord.Message, customs ...gtk.Widgetter) {
 			msg, _ = state.Cabinet.Message(m.Reference.ChannelID, m.Reference.MessageID)
 		}
 		if msg != nil {
-			member, _ := state.Cabinet.Member(m.Reference.GuildID, msg.Author.ID)
-			chip := newAuthorChip(c.ctx, m.GuildID, &discord.GuildUser{
-				User:   msg.Author,
-				Member: member,
-			})
-			chip.Unpad()
-			topBox.Append(chip)
+			if state.UserIsBlocked(msg.Author.ID) {
+				header.SetLabel(header.Label() + "blocked user.")
+			} else {
+				member, _ := state.Cabinet.Member(m.Reference.GuildID, msg.Author.ID)
+				chip := newAuthorChip(c.ctx, m.GuildID, &discord.GuildUser{
+					User:   msg.Author,
+					Member: member,
+				})
+				chip.Unpad()
+				topBox.Append(chip)
 
-			if preview := state.MessagePreview(msg); preview != "" {
-				// Force single line.
-				reply := gtk.NewLabel(strings.ReplaceAll(preview, "\n", "  "))
-				reply.AddCSSClass("message-reply-content")
-				reply.SetTooltipText(preview)
-				reply.SetEllipsize(pango.EllipsizeEnd)
-				reply.SetLines(1)
-				reply.SetXAlign(0)
+				if preview := state.MessagePreview(msg); preview != "" {
+					// Force single line.
+					reply := gtk.NewLabel(strings.ReplaceAll(preview, "\n", "  "))
+					reply.AddCSSClass("message-reply-content")
+					reply.SetTooltipText(preview)
+					reply.SetEllipsize(pango.EllipsizeEnd)
+					reply.SetLines(1)
+					reply.SetXAlign(0)
 
-				replyBox.Append(reply)
+					replyBox.Append(reply)
+					c.append(replyBox)
+				}
 			}
+		} else {
+			header.SetLabel(header.Label() + " unknown message.")
 		}
-
-		c.append(replyBox)
 	}
 
 	var messageMarkup string
@@ -188,7 +194,8 @@ func (c *Content) Update(m *discord.Message, customs ...gtk.Widgetter) {
 
 	c.view = nil
 
-	if messageMarkup != "" {
+	switch {
+	case messageMarkup != "":
 		msg := gtk.NewLabel("")
 		msg.SetMarkup(messageMarkup)
 		msg.SetHExpand(true)
@@ -217,20 +224,27 @@ func (c *Content) Update(m *discord.Message, customs ...gtk.Widgetter) {
 		systemContentCSS(msg)
 		fixNatWrap(msg)
 		c.append(msg)
-	} else {
-		// We don't render the message content if all it is is the URL to the
-		// embedded image, because that's what the official client does.
-		noContent := len(m.Embeds) == 1 &&
-			m.Embeds[0].Type == discord.ImageEmbed &&
-			m.Embeds[0].URL == m.Content
 
-		if !noContent {
-			src := []byte(m.Content)
-			node := discordmd.ParseWithMessage(src, *state.Cabinet, m, true)
+	// We render a big content if the content itself is literally a Unicode
+	// emoji.
+	case m.Content != "" && md.IsUnicodeEmoji(m.Content):
+		l := gtk.NewLabel(m.Content)
+		l.SetAttributes(gtkcord.EmojiAttrs)
+		l.SetXAlign(0)
+		l.SetSelectable(true)
+		c.append(l)
 
-			c.view = mdrender.NewMarkdownViewer(c.ctx, src, node, renderers...)
-			c.append(c.view)
-		}
+	// We don't render the message content if all it is is the URL to the
+	// embedded image, because that's what the official client does.
+	case len(m.Embeds) != 1 ||
+		m.Embeds[0].Type != discord.ImageEmbed ||
+		m.Embeds[0].URL != m.Content:
+
+		src := []byte(m.Content)
+		node := discordmd.ParseWithMessage(src, *state.Cabinet, m, true)
+
+		c.view = mdrender.NewMarkdownViewer(c.ctx, src, node, renderers...)
+		c.append(c.view)
 	}
 
 	for i := range m.Stickers {
@@ -252,6 +266,7 @@ func (c *Content) Update(m *discord.Message, customs ...gtk.Widgetter) {
 		c.append(custom)
 	}
 
+	c.SetReactions(m.Reactions)
 	c.setMenu()
 }
 
@@ -285,6 +300,20 @@ func (c *Content) Redact() {
 	c.append(red)
 }
 
+// SetReactions sets the reactions inside the message.
+func (c *Content) SetReactions(reactions []discord.Reaction) {
+	if c.react == nil {
+		if len(reactions) == 0 {
+			return
+		}
+		c.react = newContentReactions(c.ctx)
+		c.append(c.react)
+	}
+
+	c.react.Clear()
+	c.react.AddReactions(reactions)
+}
+
 var renderers = []mdrender.OptionFunc{
 	mdrender.WithRenderer(discordmd.KindEmoji, renderEmoji),
 	mdrender.WithRenderer(discordmd.KindInline, renderInline),
@@ -295,12 +324,13 @@ func renderEmoji(r *mdrender.Renderer, n ast.Node) ast.WalkStatus {
 	emoji := n.(*discordmd.Emoji)
 	text := r.State.TextBlock()
 
-	image := onlineimage.NewImage(r.State.Context(), imgutil.HTTPProvider)
-	image.EnableAnimation().OnHover()
-	image.SetTooltipText(emoji.Name)
-	image.SetFromURL(gtkcord.EmojiURL(emoji.ID, emoji.GIF))
+	picture := onlineimage.NewPicture(r.State.Context(), imgutil.HTTPProvider)
+	picture.EnableAnimation().OnHover()
+	picture.SetKeepAspectRatio(true)
+	picture.SetTooltipText(emoji.Name)
+	picture.SetURL(gtkcord.EmojiURL(emoji.ID, emoji.GIF))
 
-	v := md.InsertCustomImageWidget(text.TextView, text.Buffer.CreateChildAnchor(text.Iter), image)
+	v := md.InsertCustomImageWidget(text.TextView, text.Buffer.CreateChildAnchor(text.Iter), picture)
 	if emoji.Large {
 		v.SetSizeRequest(gtkcord.LargeEmojiSize, gtkcord.LargeEmojiSize)
 	} else {
@@ -344,7 +374,7 @@ const defaultMentionColor = "#6F78DB"
 
 func mentionTag(r *mdrender.Renderer, color string) *gtk.TextTag {
 	tag := textutil.TextTag{"background": color + "76"}
-	return tag.FromTable(r.State.TagTable(), "")
+	return tag.FromTable(r.State.TagTable(), tag.Hash())
 }
 
 func renderMention(r *mdrender.Renderer, n ast.Node) ast.WalkStatus {

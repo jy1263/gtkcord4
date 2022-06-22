@@ -94,7 +94,7 @@ var viewCSS = cssutil.Applier("message-view", `
 		background-color: alpha(@theme_fg_color, 0.125);
 	}
 	.message-list > row:hover {
-		background-color: alpha(@theme_fg_color, 0.075);
+		background-color: alpha(@theme_fg_color, 0.05);
 	}
 	.message-list > row.message-editing,
 	.message-list > row.message-replying {
@@ -183,6 +183,13 @@ func NewView(ctx context.Context, chID discord.ChannelID) *View {
 				}
 			}
 
+			// See if this message belongs to a blocked user. If it is, then
+			// don't add it.
+			if !showBlockedMessages.Value() && state.UserIsBlocked(ev.Author.ID) {
+				log.Println("ignoring message from blocked user", ev.Author.Tag())
+				return
+			}
+
 			msg := v.upsertMessage(ev.ID, newMessageInfo(&ev.Message))
 			msg.Update(ev)
 
@@ -206,6 +213,30 @@ func NewView(ctx context.Context, chID discord.ChannelID) *View {
 			}
 
 			v.deleteMessage(ev.ID)
+
+		case *gateway.MessageReactionAddEvent:
+			if ev.ChannelID != v.chID {
+				return
+			}
+			v.updateMessageReactions(ev.MessageID)
+
+		case *gateway.MessageReactionRemoveEvent:
+			if ev.ChannelID != v.chID {
+				return
+			}
+			v.updateMessageReactions(ev.MessageID)
+
+		case *gateway.MessageReactionRemoveAllEvent:
+			if ev.ChannelID != v.chID {
+				return
+			}
+			v.updateMessageReactions(ev.MessageID)
+
+		case *gateway.MessageReactionRemoveEmojiEvent:
+			if ev.ChannelID != v.chID {
+				return
+			}
+			v.updateMessageReactions(ev.MessageID)
 
 		case *gateway.MessageDeleteBulkEvent:
 			if ev.ChannelID != v.chID {
@@ -296,13 +327,18 @@ func (v *View) Load() {
 
 			widgets := make([]Message, len(msgs))
 			for i, msg := range msgs {
+				if !showBlockedMessages.Value() && state.UserIsBlocked(msg.Author.ID) {
+					log.Println("ignoring message from blocked user", msg.Author.Tag())
+					continue
+				}
 				widgets[i] = v.upsertMessage(msg.ID, newMessageInfo(&msgs[i]))
 			}
 
 			// Render the messages from latest to oldest.
 			for i := len(widgets) - 1; i >= 0; i-- {
-				m := widgets[i]
-				m.Update(&gateway.MessageCreateEvent{Message: msgs[i]})
+				if widgets[i] != nil {
+					widgets[i].Update(&gateway.MessageCreateEvent{Message: msgs[i]})
+				}
 			}
 		}
 	})
@@ -424,6 +460,23 @@ func (v *View) updateMember(member *discord.Member) {
 		}
 		return false // keep looping
 	})
+}
+
+func (v *View) updateMessageReactions(id discord.MessageID) {
+	widget, ok := v.msgs[messageKeyID(id)]
+	if !ok {
+		return
+	}
+
+	state := gtkcord.FromContext(v.ctx.Take())
+
+	msg, _ := state.Cabinet.Message(v.chID, id)
+	if msg == nil {
+		return
+	}
+
+	content := widget.message.Content()
+	content.SetReactions(msg.Reactions)
 }
 
 // SendMessage implements composer.Controller.

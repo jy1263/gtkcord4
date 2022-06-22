@@ -18,7 +18,6 @@ import (
 	"github.com/diamondburned/arikawa/v3/gateway"
 	"github.com/diamondburned/arikawa/v3/state"
 	"github.com/diamondburned/arikawa/v3/utils/httputil/httpdriver"
-	"github.com/diamondburned/arikawa/v3/utils/ws"
 	"github.com/diamondburned/chatkit/components/author"
 	"github.com/diamondburned/gotk4/pkg/glib/v2"
 	"github.com/diamondburned/gotkit/gtkutil"
@@ -62,7 +61,7 @@ func FromContext(ctx context.Context) *State {
 }
 
 func init() {
-	ws.EnableRawEvents = true
+	// ws.EnableRawEvents = true
 }
 
 // Wrap wraps the given state.
@@ -164,6 +163,8 @@ func (s *State) MemberMarkup(gID discord.GuildID, u *discord.GuildUser, mods ...
 	name := u.Username
 	var suffix string
 
+	var prefixMods []author.MarkupMod
+
 	if gID.IsValid() {
 		if u.Member == nil {
 			u.Member, _ = s.Cabinet.Member(gID, u.ID)
@@ -187,7 +188,7 @@ func (s *State) MemberMarkup(gID discord.GuildID, u *discord.GuildUser, mods ...
 			return role
 		})
 		if ok {
-			mods = append(mods, author.WithColor(c.String()))
+			prefixMods = append(prefixMods, author.WithColor(c.String()))
 		}
 	}
 
@@ -202,10 +203,10 @@ noMember:
 
 	if suffix != "" {
 		suffix = strings.TrimSpace(suffix)
-		mods = append(mods, author.WithSuffixMarkup(suffix))
+		prefixMods = append(prefixMods, author.WithSuffixMarkup(suffix))
 	}
 
-	return author.Markup(name, mods...)
+	return author.Markup(name, append(prefixMods, mods...)...)
 }
 
 // MessagePreview renders the message into a short content string.
